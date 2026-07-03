@@ -1,0 +1,39 @@
+[package]
+name = "voicedown"
+version = "0.3.0"
+description = "VoiceDown - Window Voice Transcription Tool (SenseVoice)"
+authors = ["VoiceDown"]
+edition = "2021"
+rust-version = "1.77.2"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_ProcessStatus",
+] }
+wasapi = "0.23"
+crossbeam-channel = "0.5"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"], optional = true }
+
+[profile.dev]
+# 跳过调试符号，大幅减少编译体积和链接时间
+debug = 0
+# 启用增量编译（默认已是 true，显式保留）
+incremental = true
+
+[features]
+default = ["custom-protocol", "asr"]
+custom-protocol = ["tauri/custom-protocol"]
+# ASR 功能：启用 Python 子进程桥接 paraformer-zh-streaming（funasr AutoModel 流式）
+# 不再需要 MSVC Build Tools / CMake / LLVM
+# 已设为默认 feature，`npx tauri dev` / `cargo check` 即自动启用，无需显式 --features asr
+asr = ["dep:reqwest"]

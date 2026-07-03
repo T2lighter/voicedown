@@ -1,0 +1,26 @@
+# VoiceDown ASR Python 依赖（funasr AutoModel 流式路径）
+#
+# ASR: paraformer-zh-streaming (= iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online,
+#       funasr 类 ParaformerStreaming)，真增量流式：generate(input=chunk, cache=cache,
+#       is_final=bool, chunk_size=[0,10,5])，cache 跨 chunk 复用，is_final=True 刷尾。
+#       无需 ONNX 现场导出（旧 funasr_onnx 路径已弃用）。
+#
+# 版本约束：
+#   - funasr 1.3.x 已验证可用（探针实测 1.3.14，流式实验 A/B/C/C2 全过）。
+#   - torch 2.3.1 (CPU) 已验证可用。paraformer-zh-streaming 走 PyTorch 前向，torch <=2.3
+#     沿用旧约束以避免潜在的 ONNX 导出路径问题（虽流式不导出 ONNX，但 funasr 部分子模块
+#     可能 import torch 新 API；保守锁 2.3.1）。
+#   - librosa 重采样 48k→16k；soundfile 读 wav（verify/文件转写）。
+#   - modelscope 拉模型；disable_update=True + 本地缓存命中跳过联网（首次下载 ~90s）。
+#
+# 注：旧 funasr_onnx==0.4.1 + onnxscript 路径（SenseVoiceSmall 现场导出 ONNX）已移除，
+#     改用 funasr AutoModel 直接 PyTorch 推理，依赖更轻、启动更稳。
+
+funasr>=1.3.13,<1.4
+torch==2.3.1
+torchaudio==2.3.1
+numpy>=1.24.0
+librosa==0.11.0
+soundfile==0.13.1
+modelscope==1.30.0
+jieba>=0.42.1

@@ -1,0 +1,34 @@
+{
+  "productName": "VoiceDown",
+  "version": "0.1.0",
+  "identifier": "com.voicedown.app",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5176",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "VoiceDown - 音频捕获验证",
+        "width": 800,
+        "height": 640,
+        "resizable": true,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; media-src 'self' asset: http://asset.localhost; connect-src 'self' http://localhost:*",
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["**"]
+      }
+    }
+  },
+  "plugins": {
+    "shell": {
+      "open": true
+    }
+  }
+}

@@ -1,0 +1,44 @@
+# ── 依赖 ─────────────────────────
+node_modules/
+
+# ── 构建产物 ─────────────────────
+target/
+dist/
+
+# ── Python ───────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+
+# ── 测试夹具 / 临时 ─────────────
+test.wav
+*.log
+
+# ── Tauri 构建日志 ──────────────
+src-tauri/build-log.txt
+
+# ── superpowers SDD 工作文件（task-brief/report/diff 等临时）──
+.superpowers/sdd/
+
+# ── 备份（重建仓库的旧 .git，确认新仓库 OK 后可删）──
+.git.bak/
+
+# ── IDE / 编辑器 ────────────────
+.vscode/
+.idea/
+*.swp
+
+# ── 系统 ─────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── 本地工作文件（不公开：仅本地保留）──
+# 工具契约文件（必须在根、被工具读取，单独忽略）：
+/CLAUDE.md
+/CONTEXT.md
+# docs/agents/ 等 agent 配置留根（整目录忽略）：
+/docs/
+# 其余元文档/规划/IDE 配置集中在此：
+/_local/
