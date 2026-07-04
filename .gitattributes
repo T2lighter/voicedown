@@ -1,0 +1,6 @@
+# 统一文本文件行尾为 LF（消除 Windows core.autocrlf=true 导致的假 modified 噪声）
+* text=auto eol=lf
+
+# Windows 批处理脚本保留 CRLF（batch 解析对 CRLF 敏感）
+*.bat text eol=crlf
+*.cmd text eol=crlf

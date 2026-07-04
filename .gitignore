@@ -4,6 +4,10 @@ node_modules/
 # ── 构建产物 ─────────────────────
 target/
 dist/
+# Tauri 打包产物（bundle/portable 中间文件，可重生）
+src-tauri/build/
+# portable Python ASR 分发（打包中间产物，可重生）
+src-tauri/asr_dist/
 
 # ── Python ───────────────────────
 __pycache__/
