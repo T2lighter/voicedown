@@ -52,7 +52,7 @@ impl Default for LlmConfig {
 
 pub const FINALIZE_PROMPT: &str = "你是中文文档编辑助手。对下面的语音转写全文（可能已轻度润色）做三件事：① 三级结构化：按主题转换切分「# 章节标题」，正文较长的章节仅在确有子主题时加「## 小标题」，禁止每段都升标题、禁止对单一主题强行拆章节；② 全局风格统一：全文用词、语气、书面化程度前后一致，专业、简洁、可读；③ 去冗余：删除口语语气词、重复、啰嗦，合并口水话，但不删事实、细节、专有名词、数字、人名。保持原意与信息量，不做摘要、不增删事实。只输出 markdown 文档（# / ## / 正文 / 列表），不要解释、不要加引号、不要前后缀说明。";
 
-pub const OPTIMIZE_PROMPT: &str = "你是中文语音转写文本的后处理助手。对文本做：纠正同音/近音错别字；补全并修正标点；删除口语语气词（嗯、啊、那个、就是、然后等）但保留必要连接词；轻度书面化润色；按语义完整性重新分段，通常每段约 3-5 句，以语义为准、不要机械按句数切；段落之间用一个空行（两个换行）分隔。保持原意与人称，不增删事实信息。只输出修改后的纯文本，不要解释、不要加引号。";
+pub const OPTIMIZE_PROMPT: &str = "你是中文语音转写文本的后处理助手。对文本做：纠正同音/近音错别字；补全并修正标点；删除口语语气词（嗯、啊、那个、就是、然后等）但保留必要连接词；轻度书面化润色。保持原意与人称，不增删事实信息。输出连续纯文本，不要换行、不要分段、不要解释、不要加引号。";
 
 /// mode="finalize" → Finalize；其余（含 "optimize"/未知）→ Optimize。
 pub fn build_prompt(mode: &str) -> &'static str {
@@ -134,7 +134,8 @@ impl Default for OptimizerBuffer {
 // ── 重叠重写状态机（消除批间段落断裂）──────────────────
 
 /// 重叠重写：维护 `committed`（已确认前文，只增）+ `overlap`（上批末句，每批重写）。
-/// 每批把 `overlap + 新句` 送 LLM 重新分段，段边界在 overlap 区重新对齐 → 跨批段落连贯。
+/// 每批把 `overlap + 新句` 送 LLM 重新润色，末句在 overlap 区重新对齐 → 跨批句子连贯。
+/// committed 为连续纯文本（不分段、无换行）——语义分段交给离线定稿，视觉换行交给前端 breakBySentence。
 /// 代价：overlap 区每批可能被 LLM 微调（右栏闪烁，已接受）。
 pub struct OverlapRewriter {
     committed: String,
@@ -156,8 +157,8 @@ impl OverlapRewriter {
         }
     }
 
-    /// 应用 LLM 输出：按段落切分，前 N-1 段进 committed（显示），末段进 overlap（隐藏）。
-    /// 整批 1 段 → 对半切 2 段（前段显示 + 尾段保留衔接）；0-1 句无法切 → 全显示。
+    /// 应用 LLM 输出：按句末标点切句，前 N-1 句进 committed（显示），末句进 overlap（隐藏）。
+    /// 仅 1 句 → 全显示、不留衔接；0 句 → 不变。
     /// `out` 空/失败 → 降级：把 `overlap + fallback_new` 当原文输出走同一逻辑（不丢字）。
     pub fn apply_output(&mut self, out: &str, fallback_new: &str) {
         let out_t = out.trim();
@@ -173,24 +174,17 @@ impl OverlapRewriter {
                 (false, false) => format!("{}\n{}", self.overlap.trim(), fb),
             }
         };
-        let paras = split_paragraphs(&text);
-        match paras.len() {
+        let sentences = split_sentences(&text);
+        match sentences.len() {
             0 => { /* 空不变 */ }
-            1 => match split_single_paragraph(&paras[0]) {
-                Some((head, tail)) => {
-                    // ≥2 句：对半切 → 前段显示，尾段保留衔接
-                    self.append_to_committed(&head);
-                    self.overlap = tail;
-                }
-                None => {
-                    // 0-1 句无法再切：全显示，不留衔接
-                    self.append_to_committed(&paras[0]);
-                    self.overlap.clear();
-                }
-            },
+            1 => {
+                // 单句：全显示，不留衔接
+                self.append_to_committed(&sentences[0]);
+                self.overlap.clear();
+            }
             _ => {
-                let last = paras.last().unwrap().clone();
-                let head = paras[..paras.len() - 1].join("\n\n");
+                let last = sentences.last().unwrap().clone();
+                let head = sentences[..sentences.len() - 1].join("");
                 self.append_to_committed(&head);
                 self.overlap = last;
             }
@@ -216,9 +210,7 @@ impl OverlapRewriter {
         if s.is_empty() {
             return;
         }
-        if !self.committed.is_empty() {
-            self.committed.push_str("\n\n");
-        }
+        // 连续纯文本直接拼接，不加分隔（语义分段归离线定稿，视觉换行归前端）
         self.committed.push_str(s);
     }
 }
@@ -246,17 +238,8 @@ pub fn pick_finalize_input(optimized: &str, transcription: &str) -> Option<Strin
     None
 }
 
-/// 按换行切段落（兼容 `\n` 与 `\n\n`），trim 每段、滤空行。主路径用。
-/// `OverlapRewriter::apply_output` 消费此函数做段落三分支。
-pub fn split_paragraphs(text: &str) -> Vec<String> {
-    text.split('\n')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
 /// 按句末标点（`。！？!?`）切句，保留标点；无标点返回整段 trim。
-/// 1 段兜底"强制对半切"用。
+/// `OverlapRewriter::apply_output` 句子级切句用（前 N-1 句 committed，末句 overlap）。
 pub fn split_sentences(text: &str) -> Vec<String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -280,21 +263,6 @@ pub fn split_sentences(text: &str) -> Vec<String> {
         sentences.push(tail);
     }
     sentences
-}
-
-/// 把单段文本在约中点的句末标点切成两段 `(前段, 尾段)`。
-/// 句数 < 2（无法切）→ `None`。用于 `apply_output` 的"LLM 只分出 1 段"兜底：
-/// 前段进 committed 显示，尾段作 overlap 保留衔接。
-/// `OverlapRewriter::apply_output` 1 段兜底分支消费此函数。
-pub fn split_single_paragraph(text: &str) -> Option<(String, String)> {
-    let sentences = split_sentences(text);
-    if sentences.len() < 2 {
-        return None;
-    }
-    let mid = sentences.len() / 2;
-    let head = sentences[..mid].join("");
-    let tail = sentences[mid..].join("");
-    Some((head, tail))
 }
 
 // ── 后端请求体构造（纯函数，便于单测）──────────────────
@@ -471,42 +439,6 @@ mod tests {
 
 
     #[test]
-    fn split_paragraphs_single_newline() {
-        let v = split_paragraphs("段一。\n段二。");
-        assert_eq!(v, vec!["段一。".to_string(), "段二。".to_string()]);
-    }
-
-    #[test]
-    fn split_paragraphs_double_newline() {
-        let v = split_paragraphs("段一。\n\n段二。");
-        assert_eq!(v, vec!["段一。".to_string(), "段二。".to_string()]);
-    }
-
-    #[test]
-    fn split_paragraphs_blank_lines_filtered() {
-        let v = split_paragraphs("\n\n段一。\n\n\n段二。\n");
-        assert_eq!(v, vec!["段一。".to_string(), "段二。".to_string()]);
-    }
-
-    #[test]
-    fn split_paragraphs_single_paragraph() {
-        let v = split_paragraphs("只有一段。多句。");
-        assert_eq!(v, vec!["只有一段。多句。".to_string()]);
-    }
-
-    #[test]
-    fn split_paragraphs_empty() {
-        assert!(split_paragraphs("").is_empty());
-        assert!(split_paragraphs("   \n  \n").is_empty());
-    }
-
-    #[test]
-    fn split_paragraphs_trims_each() {
-        let v = split_paragraphs("  段一。  \n  段二。 ");
-        assert_eq!(v, vec!["段一。".to_string(), "段二。".to_string()]);
-    }
-
-    #[test]
     fn split_sentences_by_punct() {
         let v = split_sentences("句一。句二！句三？");
         assert_eq!(v, vec!["句一。".to_string(), "句二！".to_string(), "句三？".to_string()]);
@@ -529,36 +461,6 @@ mod tests {
         // 末尾无标点的片段作为末句保留
         let v = split_sentences("你好。再见");
         assert_eq!(v, vec!["你好。".to_string(), "再见".to_string()]);
-    }
-
-    #[test]
-    fn split_single_paragraph_half_even() {
-        // 4 句 → mid=2，前 2 句 / 后 2 句
-        let (h, t) = split_single_paragraph("一。二。三。四。").unwrap();
-        assert_eq!(h, "一。二。");
-        assert_eq!(t, "三。四。");
-    }
-
-    #[test]
-    fn split_single_paragraph_half_odd() {
-        // 5 句 → mid=2，前 2 句 / 后 3 句
-        let (h, t) = split_single_paragraph("一。二。三。四。五。").unwrap();
-        assert_eq!(h, "一。二。");
-        assert_eq!(t, "三。四。五。");
-    }
-
-    #[test]
-    fn split_single_paragraph_two_sentences() {
-        let (h, t) = split_single_paragraph("句一。句二。").unwrap();
-        assert_eq!(h, "句一。");
-        assert_eq!(t, "句二。");
-    }
-
-    #[test]
-    fn split_single_paragraph_too_few_none() {
-        assert!(split_single_paragraph("只有一句。").is_none());
-        assert!(split_single_paragraph("").is_none());
-        assert!(split_single_paragraph("无标点整段").is_none());
     }
 
     #[test]
@@ -706,7 +608,7 @@ mod tests {
         assert!(!b.should_flush_time(), "刚 new 不应触发时间兜底");
     }
 
-    // ── OverlapRewriter（末段保留 + 隐藏；committed 段间 \n\n）──
+    // ── OverlapRewriter（末句保留 + 隐藏；committed 连续纯文本）──
     #[test]
     fn overlap_first_batch_input_is_just_new() {
         let r = OverlapRewriter::new();
@@ -714,10 +616,10 @@ mod tests {
     }
 
     #[test]
-    fn overlap_apply_output_sets_overlap_to_last_paragraph() {
+    fn overlap_apply_output_sets_overlap_to_last_sentence() {
         let mut r = OverlapRewriter::new();
-        // "句一。\n句二。" 按 \n 切成 2 段 → 前段 committed，末段 overlap
-        r.apply_output("句一。\n句二。", "fb");
+        // "句一。句二。" 按句号切 2 句 → 前句 committed，末句 overlap
+        r.apply_output("句一。句二。", "fb");
         assert_eq!(r.committed, "句一。");
         assert_eq!(r.overlap, "句二。");
     }
@@ -725,25 +627,25 @@ mod tests {
     #[test]
     fn overlap_build_input_includes_overlap_second_batch() {
         let mut r = OverlapRewriter::new();
-        r.apply_output("句一。\n句二。", "fb");
+        r.apply_output("句一。句二。", "fb");
         assert_eq!(r.build_input("新句。"), "句二。\n新句。");
     }
 
     #[test]
     fn overlap_apply_output_grows_committed_second_batch() {
         let mut r = OverlapRewriter::new();
-        r.apply_output("句一。\n句二。", "fb1");
-        // 第二批 2 段：前段追加 committed（\n\n 连接），末段进 overlap
-        r.apply_output("句二。\n新句三。", "fb2");
-        assert_eq!(r.committed, "句一。\n\n句二。");
+        r.apply_output("句一。句二。", "fb1");
+        // 第二批 2 句：前句追加 committed（直接拼接，无分隔），末句进 overlap
+        r.apply_output("句二。新句三。", "fb2");
+        assert_eq!(r.committed, "句一。句二。");
         assert_eq!(r.overlap, "新句三。");
     }
 
     #[test]
     fn overlap_full_text_excludes_overlap() {
         let mut r = OverlapRewriter::new();
-        r.apply_output("段一。\n段二。", "fb");
-        // full_text 只返回 committed（末段 overlap 隐藏，不显示）
+        r.apply_output("段一。段二。", "fb");
+        // full_text 只返回 committed（末句 overlap 隐藏，不显示）
         let full = r.full_text();
         assert_eq!(full, "段一。");
         assert!(!full.starts_with('\n'));
@@ -753,39 +655,39 @@ mod tests {
     #[test]
     fn overlap_finalize_absorbs_overlap_into_committed() {
         let mut r = OverlapRewriter::new();
-        r.apply_output("句一。\n句二。", "fb");
+        r.apply_output("句一。句二。", "fb");
         r.finalize();
-        // finalize 把隐藏的末段吸收进 committed（\n\n 连接）
-        assert_eq!(r.committed, "句一。\n\n句二。");
+        // finalize 把隐藏的末句吸收进 committed（直接拼接，无分隔）
+        assert_eq!(r.committed, "句一。句二。");
         assert!(r.overlap.is_empty());
-        assert_eq!(r.full_text(), "句一。\n\n句二。");
+        assert_eq!(r.full_text(), "句一。句二。");
     }
 
     #[test]
     fn overlap_degrade_empty_output_uses_fallback_no_dup() {
         let mut r = OverlapRewriter::new();
-        r.apply_output("句一。\n句二。", "fb1");
-        // 第二批 LLM 失败（out 空）→ overlap+fallback 原文重新切段
+        r.apply_output("句一。句二。", "fb1");
+        // 第二批 LLM 失败（out 空）→ overlap+fallback 原文重新切句
         r.apply_output("", "新句三。\n新句四。");
-        assert_eq!(r.committed, "句一。\n\n句二。\n\n新句三。");
+        assert_eq!(r.committed, "句一。句二。新句三。");
         assert_eq!(r.overlap, "新句四。");
         // full_text 不含 overlap
-        assert_eq!(r.full_text(), "句一。\n\n句二。\n\n新句三。");
+        assert_eq!(r.full_text(), "句一。句二。新句三。");
     }
 
     #[test]
-    fn overlap_single_paragraph_forced_split() {
+    fn overlap_multi_sentence_keeps_last_as_overlap() {
         let mut r = OverlapRewriter::new();
-        // LLM 只分出 1 段（4 句无换行）→ 对半切，前段显示，尾段保留衔接
+        // 4 句连续 → 前 3 句 committed，末句 overlap 保留衔接
         r.apply_output("一。二。三。四。", "fb");
-        assert_eq!(r.committed, "一。二。");
-        assert_eq!(r.overlap, "三。四。");
+        assert_eq!(r.committed, "一。二。三。");
+        assert_eq!(r.overlap, "四。");
     }
 
     #[test]
-    fn overlap_single_paragraph_too_few_shows_all() {
+    fn overlap_single_sentence_shows_all() {
         let mut r = OverlapRewriter::new();
-        // 1 段且仅 1 句 → 无法切，全显示，overlap 清空
+        // 仅 1 句 → 无法切，全显示，overlap 清空
         r.apply_output("只有一句。", "fb");
         assert_eq!(r.committed, "只有一句。");
         assert!(r.overlap.is_empty());

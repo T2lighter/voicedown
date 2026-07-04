@@ -11,6 +11,15 @@ import { useAsrState } from "./hooks/useAsrState";
 import { useTranscriptionStreams } from "./hooks/useTranscriptionStreams";
 import { useCaptureLifecycle } from "./hooks/useCaptureLifecycle";
 
+// 按句末标点做视觉换行（纯可读性，非语义分段）。
+// 先压平后端 OverlapRewriter/prompt 带来的段落换行（\n / \n\n）→ 连续文本，
+// 再按句末标点插单 \n。行内折行由 .output-content pre 的 pre-wrap + break-all 兜底。
+function breakBySentence(text: string): string {
+  return text
+    .replace(/\s*\n\s*/g, "")
+    .replace(/([。！？!?]+)/g, "$1\n");
+}
+
 function App() {
   const [errorMsg, setErrorMsg] = useState<string>("");
   const [windows, setWindows] = useState<WindowInfo[]>([]);
@@ -183,7 +192,7 @@ function App() {
             <div className="output-header">原始转录 (ASR)</div>
             <div className="output-content" ref={outputRef}>
               {transcription ? (
-                <pre>{transcription}</pre>
+                <pre>{breakBySentence(transcription)}</pre>
               ) : (
                 <div className="placeholder">
                   开始捕获后，转录文本将在此实时显示。
@@ -238,7 +247,7 @@ function App() {
                     <div className="placeholder">点击「✨ 定稿」生成结构化文档。</div>
                   )
                 ) : optimizedText ? (
-                  <pre>{optimizedText}</pre>
+                  <pre>{breakBySentence(optimizedText)}</pre>
                 ) : (
                   <div className="placeholder">
                     开始捕获后，LLM 优化文本将在此逐批显示。
