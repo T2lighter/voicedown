@@ -1,121 +1,182 @@
-# VoiceDown — v0.4
+# VoiceDown
 
-Windows 窗口音频转录工具。选择目标窗口 → 开始 WASAPI **进程级** Loopback 录制 → SenseVoiceSmall 语音转文字 → 保存 WAV + TXT。
+> **Process-level WASAPI loopback audio capture + streaming Chinese ASR for Windows.**
+> Pick a target window, record only that process's audio, and transcribe it to text in real time.
 
-仅捕获目标进程及其子进程树的音频，不影响其他系统音频。
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Tauri](https://img.shields.io/badge/Tauri-2.x-orange.svg)](https://tauri.app)
+[![Rust](https://img.shields.io/badge/Rust-stable-dea584.svg)](https://www.rust-lang.org)
+[![Python](https://img.shields.io/badge/Python-3.12-3776AB.svg?logo=python&logoColor=white)](https://www.python.org)
+[![Platform](https://img.shields.io/badge/platform-Windows-0078D6.svg)](https://learn.microsoft.com/windows/win32/coreaudio/application-loopback-audio-rendering)
+[![ASR](https://img.shields.io/badge/ASR-paraformer--zh--streaming-9cf.svg)](https://github.com/modelscope/FunASR)
 
-## 启动
+Windows 桌面应用（Tauri 2 + Rust + React）：选定目标窗口 → WASAPI **进程级** Loopback 捕获该进程及其子进程树的音频 → **paraformer-zh-streaming** 流式 ASR 实时转文字 → 保存 WAV + TXT。
 
-```powershell
-# 0. 安装 Python 依赖（首次）
-pip install -r voicedown-app/src-tauri/python_asr/requirements.txt
+**核心差异**：只录目标应用的音频，不影响系统其他声音。市面上多数中文 ASR 工具录的是系统混音或麦克风，VoiceDown 通过 WASAPI Process Loopback 做到了**进程级**隔离——开会、看直播、听播客时，只转你想转的那个应用。
 
-# 1. 启动应用（带 ASR）
-cd voicedown-app
-npx tauri dev --features asr
+![VoiceDown 主界面：双栏布局（左：实时字幕 | 右：优化文本）](public/screenshot.png)
 
-# 2. 或仅音频捕获（不带 ASR）
-npx tauri dev
-```
+## ✨ 特性
 
-## 已实现
+### 🎯 进程级捕获
+- **WASAPI Process Loopback**：仅捕获目标进程及其子进程树音频，不录系统其他声音
+- EnumWindows 枚举所有可见窗口，下拉选择目标
+- 48kHz f32 stereo → 16-bit PCM mono WAV 存档
 
-| 功能 | 状态 | 说明 |
-|------|------|------|
-| F-01 窗口选择 | ✅ | EnumWindows 枚举可见窗口，下拉选择 |
-| F-02 进程级音频捕获 | ✅ | WASAPI Process Loopback，仅捕获目标进程音频 |
-| F-03 语音转文字 (ASR) | ✅ | SenseVoice + Fsmn_vad (funasr_onnx)，流式逐句，**启动预加载**，Python 子进程桥接 |
-| F-14 文本智能优化 | ✅ | LLM 二阶段优化（Ollama/云端可选），增量分批，原始+优化双 txt |
-| GUI 重设计 | ✅ | Apple 设计语言深色主题，双栏对比布局（原始转录 \| 优化文本）+ 设置模态（启用开关 / 后端分段 / 深度分段 / endpoint·model·api_key 输入） |
-| 音频回放 | ✅ | 停止后自动显示 `<audio>` 播放器 |
-| 转录文本保存 | ✅ | 停止后自动保存 `.txt` 文件 |
+### 🎙️ 实时流式 ASR
+- **paraformer-zh-streaming** 真增量流式识别（600ms/chunk，cache 跨块复用，连续长语音末段不丢）
+- **ct-punc 标点模型懒加载**：启动仅加载 paraformer 即就绪（~15s），标点模型后台加载不阻塞 UI
+- **ASR 崩溃自愈监管**：Python 子进程异常自动重启，会话不中断
+- 启动即预加载模型，「开始捕获」即用，不丢前期音频
+- 繁→简自动转换（OpenCC）+ 用户词典最长匹配替换
 
-### ASR 引擎：SenseVoice + Fsmn_vad（流式逐句）
+### ✍️ LLM 文本优化（两阶段）
+- **实时草稿**：捕获时增量分批优化（字数/句数/时间任一阈值触发），独立线程不阻塞实时字幕
+- **离线定稿**：停止后手动触发整篇结构化优化
+- 后端可切换：**Ollama 本地** / **OpenAI 兼容云端**（默认 DeepSeek）
+- 轻度（纠错 + 标点 + 语气词）/ 深度（+ 分段润色）两档 prompt
+- **降级铁律**：单批 LLM 失败用原始文本回退，永不丢原文、永不阻塞停止
 
-- **技术**: Alibaba FunASR SenseVoiceSmall + Fsmn_vad，通过 `funasr_onnx` Python 子进程调用
-- **流式协议**: Rust 喂 48k 原始音频 → Python 端 `librosa` 重采样到 16k → **Fsmn_vad 逐句切分** → SenseVoice 逐句识别 → 结果回传 Rust
-- **启动预加载**: 应用启动即后台加载模型（~8.6s，不阻塞 UI），`start_capture` 复用已就绪的 bridge —— 消除点击「开始」后才加载模型导致的**前期音频丢失**。前端双保险：监听 `asr-ready`/`asr-error` 事件 + 轮询 `get_asr_state`（每 1s）兜底（commit c49958b，因 Tauri 事件触发即忘曾导致永久卡在加载中），「开始」按钮在加载完成前禁用
-- **中文准确率**: ~95%+ (test.wav 实测：「甚至出现交易几乎停滞的情况」零字错，对标 SenseVoice CER 基准 8.01%)
-- **特点**: 自带标点恢复、逆文本正则化 (ITN)、简繁自动转换；VAD 逐句输出，实时性好
-- **依赖**: Python 3.10+ + funasr_onnx + onnxruntime；首次运行若 SenseVoice ONNX 缺失，会调用 funasr + torch 现场导出（**非纯轻量**，需 funasr 与 torch）
-- **关键版本锁**: torch 必须为 `2.3.1`（torch≥2.4 的 ONNX 导出图在 onnxruntime<1.21 下无法加载），Fsmn_vad 必须用 `quantize=True`（仓库仅发布量化版）
+### 💾 可配置导出
+- 导出开关 + 格式（`txt` / `md`）+ 自定义导出目录
+- **停止异步化**：导出在后台收尾线程完成，UI 不卡顿
+- 产物：WAV + 原始 TXT + 优化 TXT（按配置）
 
-### 文本优化 (F-14) — 第二阶段
+### 🎨 界面
+- Apple 风格深色主题，磨砂玻璃 toolbar（`backdrop-filter: blur + saturate`）
+- 双栏对比布局：左「实时字幕」| 右「优化文本」（未开启优化时退化为单栏）
+- 状态点（idle 绿 / capturing 红脉动 / stopping 橙）+ ASR 就绪徽章
 
-- **作用**：对 ASR 原始文本做错别字纠错、标点修正、语气词过滤、（深度模式）分段润色
-- **后端**：抽象 trait，运行时按配置切换 —— Ollama 本地（`/api/generate`）或 OpenAI 兼容云端（`/chat/completions`，默认 DeepSeek）
-- **触发**：增量分批（攒满 8 句 / 400 字 / 30s 任一阈值），独立线程不阻塞实时字幕
-- **模式**：轻度（纠错+标点+语气词）/ 深度（+分段+润色），temperature 0.3
-- **配置**：`%USERPROFILE%\Documents\VoiceDown\llm_config.json`，前端「优化设置」面板编辑
-- **设置面板**：测试连接按钮右侧就地显示结果（测试中…/✓成功/✗失败，任意配置改动自动失效上次结果），API Key 填写后 debounce 自动保存到 `llm_config.json`
-- **降级**：LLM 失败时该批用原始文本，永不丢原文、永不阻塞停止
-- **产物**：`capture_xxx.txt`（原始）+ `capture_xxx_optimized.txt`（优化）
-- **依赖**：随 `asr` feature 引入 `reqwest`（blocking + rustls-tls）
+## 🚀 快速开始
 
-### 界面设计
-
-- **设计语言**：Apple 风格深色主题，系统配色 token（`systemBackground #1c1c1e` 等），磨砂玻璃 toolbar（`backdrop-filter: blur + saturate`）
-- **双栏对比布局**：开启优化时左栏「原始转录 (ASR)」| 右栏「优化文本 (LLM)」并排对照；未开启时退化为单栏
-- **设置模态**：齿轮图标按钮触发，含启用开关（toggle switch）、后端分段控件（Ollama 本地 / 云端 API）、深度分段控件（轻度 / 深度）、endpoint·model·api_key 输入
-- **状态指示**：状态点（idle 绿 / capturing 红脉动 / stopping 橙）+ ASR 徽章
-
-### 音频捕获详情
-
-- **技术**: Wasapi crate v0.23 (`AudioClient::new_application_loopback_client`)
-- **格式**: 32-bit float, 48000Hz, 立体声 → WAV (16-bit PCM, mono, 48000Hz)
-- **已验证**: Chrome, Firefox, 夸克网盘 (Electron) 均正常捕获有声内容
-
-## 构建依赖
+### 前置依赖
 
 | 依赖 | 说明 |
 |------|------|
-| Rust 1.77+ | 编译后端 |
+| Rust (stable) | 编译 Tauri 后端 |
 | Node.js 18+ | 前端构建 |
-| Python 3.12 | ASR 引擎 (仅 `asr` feature) |
-| funasr_onnx | SenseVoice + Fsmn_vad ONNX 推理 (pip install) |
-| torch 2.3.1 | 首次现场导出 SenseVoice ONNX (全局安装) |
-| reqwest 0.12 | F-14 LLM HTTP 调用 (仅 `asr` feature) |
+| Python 3.12 | ASR 引擎（全局安装） |
 
-**不再需要**: MSVC Build Tools / CMake / LLVM
+> **首次运行需下载模型 ~2GB**（paraformer-streaming ~848MB + ct-punc ~1.1GB，从 ModelScope 下载，缓存后免重复下载）。
 
-## 已知问题
+### 1. 安装 Python ASR 依赖
 
-| 问题 | 状态 | 说明 |
-|------|------|------|
-| UWP 应用 (Media Player 等) | ⚠️ 待修复 | ApplicationFrameHost 托管窗口，需回退到顶层 PID 策略 |
+```powershell
+pip install -r src-tauri/python_asr/requirements.txt
 
-## 项目结构
+# 验证流式 API（首跑下载模型 ~90s，缓存命中 ~10s）
+cd src-tauri/python_asr
+python verify_api.py test.wav
+```
+
+依赖锁定：`funasr>=1.3.13,<1.4` + `torch==2.3.1` + `torchaudio` + `librosa` + `soundfile` + `modelscope`。
+
+### 2. 启动应用
+
+```powershell
+# 默认带 ASR（asr 已为默认 feature）
+npx tauri dev
+
+# 或仅音频捕获（无 ASR，无需 Python 环境）
+npx tauri dev --no-default-features --features custom-protocol
+```
+
+### 3. 使用流程
+
+1. 启动后 ASR 模型后台预加载（~15s 就绪，「开始」按钮加载中禁用）
+2. 下拉选择目标窗口
+3. 点「开始捕获」→ 实时字幕逐句显示
+4. （可选）开启「优化文本」→ 右栏实时显示 LLM 优化结果
+5. 点「停止」→ 自动保存到 `%USERPROFILE%\Documents\VoiceDown\`（`capture_<timestamp>.wav` + `.txt`）
+
+## 🏗️ 架构
+
+两个进程，通过 stdio JSON lines 通信：
+
+```mermaid
+flowchart LR
+    W["目标窗口<br/>(PID)"] --> AC["audio_capture.rs<br/>WASAPI Process Loopback<br/>48k f32 mono"]
+    AC -->|"300ms 块"| CH[("crossbeam channel")]
+    CH --> FB["feed 子线程<br/>bridge.feed_audio"]
+    FB --> PY["Python asr_server.py<br/>librosa 48k→16k<br/>StreamBuffer 攒 600ms 块"]
+    PY -->|"paraformer-zh-streaming<br/>增量识别"| RES["stdout JSON lines"]
+    RES --> BR["python_bridge.rs<br/>stdout 读取线程"]
+    BR --> MT["主线程<br/>t2s + 词典<br/>emit 实时字幕"]
+    MT -.->|"旁路 channel"| OPT["优化线程<br/>OptimizerBuffer 攒批"]
+    OPT -.->|"emit 优化文本"| UI(["React WebView<br/>双栏显示"])
+    MT --> UI
+```
+
+- **Rust 主进程**（Tauri）：WASAPI 捕获 + IPC 命令 + ASR 三线程编排（feed 子线程 / 主线程收 result / punc 线程）+ React WebView
+- **Python 子进程**（`asr_server.py`）：模型加载 + StreamBuffer 攒块 + ParaformerStreaming 流式识别
+
+**实时性关键**：feed 子线程独占音频管道写入，主线程独占 result 消费——音频管道阻塞不会饿死字幕推送，故字幕始终实时。
+
+## ⚠️ 已知限制
+
+VoiceDown 的捕获粒度是 **WASAPI Process Loopback**，这些是架构固有限制（非 bug，无法在当前架构内解决）：
+
+- **🌐 浏览器多窗口串音**：Chrome / Firefox 所有窗口和标签页共享同一个浏览器进程。选任一浏览器窗口，都会录到该实例**全部窗口/标签页**的音频混音。前端已用「应用级音频捕获」徽标如实标注。
+- **🪟 UWP 应用暂不支持**：Media Player 等 `ApplicationFrameHost` 托管的窗口无法捕获。
+- **📦 应用级而非窗口级**：WASAPI Process Loopback 的粒度是进程(PID) + 进程树，没有窗口或标签页维度。
+
+## 📂 项目结构
 
 ```
-voicedown-app/
+voicedown/
 ├── src/                          # 前端 (React + TypeScript)
-│   ├── App.tsx                   # 主界面
-│   └── App.css                   # 深色主题样式
+│   ├── App.tsx                   # 主界面（组合）
+│   ├── types.ts                  # 共享类型定义
+│   ├── components/               # WindowDropdown / SettingsModal / DictionaryModal / ExportSettingsModal
+│   └── hooks/                    # useAsrState / useTranscriptionStreams / useCaptureLifecycle
 ├── src-tauri/
-│   ├── python_asr/               # Python ASR 服务（流式 VAD）
-│   │   ├── asr_server.py         # SenseVoice + Fsmn_vad 流式 stdio 服务
-│   │   ├── verify_api.py         # API 冒烟测试
+│   ├── python_asr/               # Python ASR 服务
+│   │   ├── asr_server.py         # paraformer-zh-streaming 流式 stdio 服务 + StreamBuffer
+│   │   ├── verify_api.py         # 流式 API 冒烟测试
 │   │   ├── requirements.txt      # Python 依赖（torch 2.3.1 锁版本）
-│   │   └── tests/                # VAD endpoint 单元测试
+│   │   └── tests/                # StreamBuffer 攒块单测
 │   └── src/
-│       ├── main.rs               # 入口
-│       ├── lib.rs                # IPC 命令 + ASR 流式桥接 (feed_audio/result)
-│       ├── window_selector.rs    # F-01: EnumWindows + PID 选择
-│       ├── audio_capture.rs      # F-02: WASAPI Process Loopback + 300ms 分块
-│       ├── python_bridge.rs      # Python 子进程管理 (feed_audio/result_rx)
-│       ├── text_optimizer.rs     # F-14: 文本优化 LLM 后端(Ollama/OpenAI) + 增量分批
-│       └── asr_engine.rs         # 简繁转换 + 文本工具
+│       ├── lib.rs                # IPC 命令 + ASR/优化线程编排
+│       ├── audio_capture.rs      # WASAPI Process Loopback + 300ms 分块
+│       ├── python_bridge.rs      # Python 子进程生命周期 + 流式协议
+│       ├── asr_supervisor.rs     # ASR 崩溃自愈监管器
+│       ├── asr_session.rs        # ASR 会话三线程编排
+│       ├── text_optimizer.rs     # LLM 文本优化 (Ollama/OpenAI) + 攒批
+│       ├── text_postprocess.rs   # 繁→简 + 词典替换
+│       ├── dsp.rs / wav_render.rs / time_util.rs
+│       ├── capture_finalizer.rs / export_config.rs
+│       └── window_selector.rs    # EnumWindows 窗口枚举
 ├── package.json
 ├── vite.config.ts
-└── src-tauri/tauri.conf.json     # 端口 5176
+└── src-tauri/tauri.conf.json
 ```
 
-## 技术栈
+## 🛠️ 技术栈
 
 | 层 | 技术 |
 |----|------|
-| Frontend | React 18 + TypeScript 5 + CSS |
+| Frontend | React 18 + TypeScript 5 + Vite |
 | Desktop | Tauri 2.x |
-| Audio | Rust + wasapi crate v0.23 (WASAPI Process Loopback) |
-| ASR | Python + funasr_onnx (SenseVoiceSmall ONNX) |
-| Window Enum | Rust + windows crate v0.58 (EnumWindows + Kernel32) |
+| Audio | Rust + wasapi crate（WASAPI Process Loopback） |
+| ASR | Python 3.12 + funasr（paraformer-zh-streaming 真流式） |
+| Punctuation | ct-punc（懒加载） |
+| LLM 优化 | Ollama / OpenAI 兼容（reqwest + rustls-tls） |
+| Window Enum | Rust + windows crate（EnumWindows + Kernel32） |
+
+## 🔧 开发
+
+```powershell
+# Rust 检查 / 测试（asr 已为默认 feature，自动启用）
+cargo check --manifest-path src-tauri/Cargo.toml
+cargo test  --manifest-path src-tauri/Cargo.toml
+
+# 前端类型检查
+npx tsc --noEmit
+
+# Python 单测（StreamBuffer 攒块）
+cd src-tauri/python_asr && python -m pytest tests/test_stream_buffer.py -v
+```
+
+## 📄 License
+
+[MIT License](LICENSE) © 2026 T2lighter
